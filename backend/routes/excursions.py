@@ -1,0 +1,132 @@
+from datetime import date, timedelta
+from flask import Blueprint, jsonify, request
+from sqlalchemy import func
+
+from extensions import db
+from models import Excursion, Destination, Country, Comment, Favorite, Booking
+from ._helpers import current_user, login_required, get_json, clean_text
+
+bp = Blueprint("excursions", __name__)
+
+@bp.get("/")
+def list_excursions():
+    q = (Excursion.query
+         .join(Excursion.destination)
+         .join(Destination.country))
+
+    kind = request.args.get("kind")
+    if kind in ("excursion", "package"):
+        q = q.filter(Excursion.kind == kind)
+
+    code = request.args.get("country")
+    if code:
+        q = q.filter(Country.code == code.upper())
+
+    dest_id = request.args.get("destination", type=int)
+    if dest_id:
+        q = q.filter(Excursion.destination_id == dest_id)
+
+    pmax = request.args.get("price_max", type=int)
+    if pmax:
+        q = q.filter(Excursion.price_from <= pmax)
+
+    sort = request.args.get("sort", "")
+    if sort == "price_asc":
+        q = q.order_by(Excursion.price_from.asc())
+    elif sort == "price_desc":
+        q = q.order_by(Excursion.price_from.desc())
+    elif sort == "title":
+        q = q.order_by(Excursion.title.asc())
+    else:
+        q = q.order_by(Excursion.is_featured.desc(), Excursion.id.asc())
+
+    page = max(1, request.args.get("page", 1, type=int))
+    per_page = min(36, max(1, request.args.get("per_page", 12, type=int)))
+    total = q.count()
+    items = q.offset((page - 1) * per_page).limit(per_page).all()
+
+    return jsonify(
+        items=[e.to_dict() for e in items],
+        page=page, per_page=per_page, total=total,
+        pages=(total + per_page - 1) // per_page,
+    )
+
+@bp.get("/featured")
+def featured():
+    items = (Excursion.query
+             .filter(Excursion.is_featured.is_(True))
+             .order_by(Excursion.id.asc())
+             .limit(6).all())
+    return jsonify(items=[e.to_dict() for e in items])
+
+@bp.get("/<slug>")
+def detail(slug):
+    e = Excursion.query.filter_by(slug=slug).first()
+    if not e:
+        return jsonify(error="not_found"), 404
+
+    comments = (Comment.query
+                .filter_by(target_type="excursion", target_id=e.id, is_approved=True)
+                .order_by(Comment.created_at.desc())
+                .limit(20).all())
+
+    related = (Excursion.query
+               .join(Excursion.destination)
+               .filter(Destination.country_id == e.destination.country_id,
+                       Excursion.id != e.id)
+               .limit(3).all())
+
+    in_fav = False
+    u = current_user()
+    if u:
+        in_fav = Favorite.query.filter_by(
+            user_id=u.id, target_type="excursion", target_id=e.id
+        ).first() is not None
+
+    return jsonify(
+        excursion=e.to_dict(full=True),
+        comments=[c.to_dict() for c in comments],
+        related=[r.to_dict() for r in related],
+        in_favorites=in_fav,
+    )
+
+@bp.get("/<int:exc_id>/availability")
+def availability(exc_id):
+    exc = Excursion.query.get_or_404(exc_id)
+    today = date.today()
+    horizon = today + timedelta(days=60)
+
+    rows = (db.session.query(Booking.departure_date,
+                             func.count(Booking.id).label("cnt"),
+                             func.sum(Booking.tourists).label("people"))
+            .filter(Booking.excursion_id == exc.id,
+                    Booking.status.in_(("pending", "paid")),
+                    Booking.departure_date >= today,
+                    Booking.departure_date <= horizon)
+            .group_by(Booking.departure_date)
+            .all())
+
+    return jsonify(
+        excursion_id=exc.id,
+        booked=[
+            {"date": r.departure_date.isoformat(),
+             "bookings": int(r.cnt),
+             "people": int(r.people or 0)}
+            for r in rows
+        ],
+    )
+
+@bp.post("/<int:exc_id>/comments")
+@login_required
+def add_comment(exc_id):
+    e = Excursion.query.get_or_404(exc_id)
+    data = get_json()
+    body = clean_text(data.get("body"))
+    if not body:
+        return jsonify(error="empty"), 400
+
+    u = current_user()
+    c = Comment(target_type="excursion", target_id=e.id, user_id=u.id, body=body)
+    db.session.add(c)
+    db.session.commit()
+    return jsonify(comment=c.to_dict()), 201
