@@ -59,6 +59,8 @@ docker compose up --build
 
 ### Как зайти в админку
 
+
+
 1. Открыть `http://localhost:5000/auth`
 2. Email: `admin@qsor.ru`, пароль: `admin123`
 3. После входа в шапке появится имя «Администратор» — клик по нему ведёт на `/admin`. Или сразу перейти на `http://localhost:5000/admin`
