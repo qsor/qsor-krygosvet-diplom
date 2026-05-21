@@ -16,6 +16,8 @@ MOBILE = {
     "has_touch": True,
 }
 
+
+
 def login(page, email, password):
     page.goto(BASE + "/", wait_until="networkidle")
     page.evaluate(
